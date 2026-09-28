@@ -4,11 +4,10 @@ from .util import readonly, file_stamp
 
 
 REQUIRED = {
-    "metadata": "key value",
-    "target_prs": "pr_id repo_id pr_number expected_author_id collection_status commit_total_count commit_observed_count commit_observation_status label_observed_count",
-    "pr_details": "pr_id repo_id pr_number author_database_id author_login author_name author_email body_markdown head_ref_name created_at collected_at_utc",
-    "pr_commits": "pr_id ordinal sha message author_name author_email author_user_login author_user_database_id committed_date",
-    "pr_labels": "pr_id ordinal name",
+    "target_prs": "pr_id repo_id pr_number expected_author_id collection_status",
+    "pr_details": "pr_id repo_id pr_number author_database_id author_login author_name author_email body_markdown head_ref_name",
+    "pr_commits": "pr_id sha message author_name author_email author_user_login author_user_database_id",
+    "pr_labels": "pr_id name",
 }
 
 ALLOWED_COLLECTION_STATUSES = {
@@ -33,7 +32,7 @@ def source_stamp(path):
     return file_stamp(path)
 
 
-def preflight(input_path, config, deep_check=False):
+def preflight(input_path, deep_check=False):
     path = resolve_input(input_path)
     if not path.is_file():
         raise ValueError("Input database not found: " + str(path))
@@ -130,27 +129,25 @@ def detect_one(c, target, scanner):
 
     scanner.begin({**t, **d, "target_author_id": t["expected_author_id"]})
 
-    # Improvement over commit-only identity checks: inspect the PR author too.
+    # PR and commit authors use the same native-author matcher.
     pr_actor_id = d["author_database_id"] if d["author_database_id"] is not None else t["expected_author_id"]
     scanner.identity(
         d, "pr", t["pr_id"], "author_login", "author_email", "author_name", pr_actor_id
     )
 
-    # Inspect explicit PR-body traces and task links.
+    # Parse PR-body attribution declarations into Identity targets.
     scanner.text(d["body_markdown"], "pr", t["pr_id"], "body_markdown", pr_actor_id)
     scanner.metadata(d["head_ref_name"], "branches", t["pr_id"], "head_ref_name")
 
     labels = [
-        dict(r) for r in c.execute("SELECT * FROM pr_labels WHERE pr_id=? ORDER BY ordinal", (t["pr_id"],))
+        dict(r) for r in c.execute("SELECT * FROM pr_labels WHERE pr_id=? ORDER BY name", (t["pr_id"],))
     ]
     for label in labels:
-        scanner.metadata(label["name"], "labels", label.get("label_node_id", label["ordinal"]), "name")
+        label_id = label.get("label_node_id") or label.get("ordinal") or label["name"]
+        scanner.metadata(label["name"], "labels", label_id, "name")
 
-    count, missing_email = 0, 0
-    for row in c.execute("SELECT * FROM pr_commits WHERE pr_id=? ORDER BY ordinal", (t["pr_id"],)):
+    for row in c.execute("SELECT * FROM pr_commits WHERE pr_id=? ORDER BY sha", (t["pr_id"],)):
         commit = dict(row)
-        count += 1
-        missing_email += not bool(commit["author_email"])
         scanner.identity(
             commit,
             "commit",
@@ -159,30 +156,18 @@ def detect_one(c, target, scanner):
             "author_email",
             "author_name",
             commit["author_user_database_id"],
-            commit["committed_date"],
+            commit.get("committed_date"),
         )
-        # Co-Authored-By and Generated/Implemented/... attribution phrases are
-        # both read from the commit message.
+        # Commit messages use the same attribution parser and also check registered structured signatures.
         scanner.text(
             commit["message"],
             "commit",
             commit["sha"],
             "message",
             commit["author_user_database_id"],
-            commit["committed_date"],
+            commit.get("committed_date"),
         )
 
     result.update(scanner.summary())
-    result.update(
-        unavailable_reason="",
-        commit_observed_count=count,
-        commit_total_count=t["commit_total_count"],
-        commit_observation_status=t["commit_observation_status"],
-        label_observed_count=len(labels),
-        missing_commit_author_email_count=missing_email,
-        author_identity_missing=d["author_database_id"] is None,
-        empty_pr_body=not bool((d["body_markdown"] or "").strip()),
-        created_at=d["created_at"],
-        collected_at_utc=d["collected_at_utc"],
-    )
+    result["unavailable_reason"] = ""
     return result

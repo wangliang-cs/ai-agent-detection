@@ -1,19 +1,56 @@
-# 🤖 PR Agent Detector
+# 🤖 PR Agent Detector V1.41
 
-离线、可审计的 GitHub Pull Request 编码 Agent 痕迹检测工具。工具只读取已经采集好的 SQLite 数据库。
+离线、可审计的 GitHub Pull Request 编码 Agent 痕迹检测工具。工具只读取已经采集好的 SQLite 数据库，不使用 LLM、embedding、NLP 或置信度打分。
 
 ## 检测范围
 
-主要检测：
+检测覆盖三类证据：
 
-- PR 作者与 commit 作者中的已知 Agent 身份；
-- PR body 与 commit message 中的 `Co-Authored-By:` Agent；
-- PR body 与 commit message 中明确的 Agent 使用声明；自由文本只接受明确的编码 Agent / Agent 模式名称，不把裸模型名、泛化 AI 标记或 Agent 辅助工具自动视为 Agent；
-- PR body 与 commit message 中已登记的 Agent 任务链接；
-- PR head branch 与当前 labels 中的 Agent 规则。
+- **身份声明（Identity）**
+  - PR 作者身份；
+  - commit 作者身份；
+  - PR body 中的 Agent attribution；
+  - commit message 中的 Agent attribution；
+  - 少量已登记的结构化 commit-message 身份声明。
+- **Branch**：PR head branch；
+- **Label**：PR 当前 labels。
 
-工具同时区分痕迹属于目标 PR 作者、其他 commit 作者、未知行为者，还是仅来自 branch/label 元数据。
+Author 与正文 attribution 使用两张独立但允许重叠的证据表。PR 作者和 commit 作者仍统一拼成：
 
+```text
+login | name <email>
+```
+
+随后只使用 Author 侧正则表扫描这个完整字符串。
+
+PR body 与 commit message 不直接全文搜索 Agent 名称，而是先识别 attribution grammar，再在前缀之后、当前句子或分句结束之前的片段中搜索正文侧规则。例如：
+
+```text
+Generated with Claude Code
+Generated-by: ZCode
+Co-authored with Kiro
+Co authored by Kiro
+Co-developed-by: Qoder <noreply@qoder.com>
+Authored with assistance from Codex
+Built with the help of Augment Code
+```
+
+冒号、辅助短语及其他片段内容不需要单独配置，正文规则可以出现在该有界片段中的任意位置。
+
+另有两类结构化 commit-message 身份声明：
+
+```text
+🤖 Plandex → <summary>
+Replit-Commit-Author: Agent
+```
+
+它们只扫描 commit message，在检测结论中仍属于 Identity 类证据。Aider 的 `(aider)` 形式仍按 Author 规则处理。
+
+任意一类证据命中，该 PR 即记为 `agent_trace_detected`；否则为 `no_trace_detected`；数据本身未完成采集时输出 `unavailable`。
+
+PR 的 `tools` 使用集合语义，同一 Agent 多次命中仍只列出一次。`evidence_count` 仅用于核对证据行，不参与分类、权重或使用强度计算。
+
+工具同时区分 Identity 证据属于目标 PR 作者、其他 commit 作者还是未知行为者；Branch / Label 单独记为 metadata 证据。
 
 ## 🚀 使用
 
@@ -37,66 +74,52 @@ python scripts/cli.py detect "F:\data\pr_agent_inputs" "F:\data\agent_detection_
 
 ### 导出结果
 
-检测完成后，可将结果导出为便于分析和人工检查的文件：
-
 ```bash
 python scripts/cli.py export <output_dir>
-```
-
-例如：
-
-```bash
-python scripts/cli.py export "F:\data\agent_detection_result"
 ```
 
 ### 可选功能
 
-如只希望在正式运行前检查输入数据库，可以执行：
-
 ```bash
 python scripts/cli.py preflight <input>
-```
-
-如需要在检测完成后重新执行结果一致性审计，可以执行：
-
-```bash
 python scripts/cli.py audit <output_dir>
 ```
 
-检测命令还支持以下可选参数：
+检测命令支持：
 
-* `--workers N`：并行处理进程数，默认值为 `4`。
-* `--shard-size N`：每个处理分片包含的 PR 数，默认值为 `500`。
-* `--sample-size N`：仅检测前 N 个可处理 PR，可用于快速测试。
-* `--deep-check`：在运行前额外执行 SQLite 完整性检查。
-
-例如，使用 8 个并行进程运行：
-
-```bash
-python scripts/cli.py detect <input> <output_dir> --workers 8
-```
-
-例如，只抽样检测 100 个 PR：
-
-```bash
-python scripts/cli.py detect <input> <output_dir> --sample-size 100
-```
-
-通常情况下，直接使用默认参数即可：
-
-```bash
-python scripts/cli.py detect <input> <output_dir>
-python scripts/cli.py export <output_dir>
-```
+- `--workers N`：并行处理进程数，默认 `4`；
+- `--shard-size N`：每个分片的 PR 数，默认 `500`；
+- `--sample-size N`：仅检测前 N 个可处理 PR；
+- `--deep-check`：运行前额外执行 SQLite `quick_check`。
 
 ## 输出
 
 - `detection.sqlite3`：PR 结果与逐条证据；
 - `audit.json`：结果一致性审计；
 - `run_context.json`：本次运行使用的规则快照与输入信息；
-- `exports/pr_labels.csv.gz`：PR 级结果；
+- `exports/pr_results.csv.gz`：PR 级结果；
 - `exports/evidence.jsonl.gz`：逐条检测证据；
 - `exports/tool_catalog.json`：Agent 规则目录；
-- `exports/rule_contributions.json`：各规则命中的 PR 数。
+- `exports/rule_contributions.json`：各检测机制命中的 PR 数；
+- `exports/export_summary.json`：导出对应的审计摘要。
 
-规则配置位于 `config/rules/`。检测规则见 `DETECTION_RULES.md`，输入接口见 `INPUT_SCHEMA.md`。
+## 规则维护
+
+`config/rules/agents.json` 是检测规则的唯一机器事实源，当前包含：
+
+```text
+56 Agents
+89 Author patterns
+156 Text attribution patterns
+62 patterns shared by both sides
+13 Branch patterns
+2 Label patterns
+2 Raw message signatures
+262 executable pattern instances in total
+```
+
+README、`DETECTION_RULES.md`、`AGENT_RULES.md` 只用于说明和交付，不参与规则加载。
+
+修改 `agents.json` 后，执行 `python scripts/render_rule_docs.py` 重新生成 `AGENT_RULES.md`；README 与 `DETECTION_RULES.md` 中的库存数字为手工维护，需一并更新。
+
+输入接口见 `INPUT_SCHEMA.md`。
